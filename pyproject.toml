@@ -1,0 +1,50 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "totolo-search"
+authors = [
+    { name = "Mikael Onsjö", email = "mikael@odinlake.net" },
+    { name = "Paul Sheridan", email = "paul.sheridan.stats@gmail.com" },
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+classifiers = ["License :: OSI Approved :: MIT License"]
+dynamic = ["version", "description"]
+
+[project.scripts]
+totolo-search = "totolo_search.cli:main"
+
+[project.urls]
+Home = "https://www.themeontology.org/"
+Source = "https://github.com/theme-ontology/python-totolo-search"
+
+[tool.pylint.BASIC]
+good-names = "a,sa"
+
+[tool.pylint."MESSAGES CONTROL"]
+disable = [
+    "missing-module-docstring",         # don't want it
+    "missing-class-docstring",          # don't want it
+    "missing-function-docstring",       # don't want it
+    "too-few-public-methods",           # don't want it
+    "logging-fstring-interpolation",    # don't want it
+    "too-many-arguments",               # borderline acceptable
+    "super-init-not-called",            # borderline acceptable
+    "import-outside-toplevel",          # borderline acceptable
+    "no-member",                        # pylint gets it wrong
+    "unsupported-membership-test",      # pylint gets it wrong
+    "not-callable",                     # pylint gets it wrong
+    "unsubscriptable-object",           # pylint gets it wrong
+    "unsupported-assignment-operation", # pylint gets it wrong
+    "unsupported-delete-operation",     # pylint gets it wrong
+    "super-with-arguments",             # pylint gets it wrong
+    "abstract-class-instantiated",      # pylint gets it wrong with ExcelWriter
+    "too-many-positional-arguments",    # too late to change (or todo)
+]
+
+[tool.coverage.report]
+exclude_also = [
+    "if __name__ == .__main__.:",
+]

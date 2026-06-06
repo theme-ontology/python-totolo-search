@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>totolo search</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 24px; color: #222; }
+    h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 20px; color: #444; }
+    #query { width: 100%; padding: 10px 14px; font-size: 1rem; border: 1px solid #ccc; border-radius: 6px; outline: none; }
+    #query:focus { border-color: #666; }
+    #status { margin-top: 10px; font-size: 0.85rem; color: #888; min-height: 1.2em; }
+    #results { margin-top: 24px; }
+    .result { padding: 14px 0; border-bottom: 1px solid #eee; }
+    .result:last-child { border-bottom: none; }
+    .result-meta { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+    .result-type { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: #999; }
+    .result-title a { font-size: 1rem; font-weight: 600; color: #1a6eb5; text-decoration: none; }
+    .result-title a:hover { text-decoration: underline; }
+    .result-body { font-size: 0.875rem; color: #555; line-height: 1.5; margin-top: 4px; }
+    .result-scores { font-size: 0.72rem; color: #bbb; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h1>totolo search</h1>
+  <input type="text" id="query" placeholder="Search themes and stories..." autofocus>
+  <div id="status"></div>
+  <div id="results"></div>
+  <script>
+    const queryEl = document.getElementById("query");
+    const statusEl = document.getElementById("status");
+    const resultsEl = document.getElementById("results");
+    let timer;
+
+    queryEl.addEventListener("input", e => {
+      clearTimeout(timer);
+      const q = e.target.value.trim();
+      if (!q) { resultsEl.innerHTML = ""; statusEl.textContent = ""; return; }
+      statusEl.textContent = "Searching...";
+      timer = setTimeout(() => doSearch(q), 300);
+    });
+
+    async function doSearch(q) {
+      try {
+        const res = await fetch(`/search?q=${encodeURIComponent(q)}`);
+        const docs = await res.json();
+        statusEl.textContent = `${docs.length} results`;
+        resultsEl.innerHTML = docs.map(d => {
+          const url = d.type === "theme"
+            ? `https://www.themeontology.org/theme/${encodeURIComponent(d.name)}`
+            : `https://www.themeontology.org/story/${encodeURIComponent(d.name)}`;
+          const body = d.type === "theme"
+            ? esc(d.description)
+            : `${esc(d.title || "")}: ${esc(d.description)}`;
+          return `
+            <div class="result">
+              <div class="result-meta">
+                <span class="result-type">${d.type}</span>
+                <span class="result-title"><a href="${url}" target="_blank">${esc(d.name)}</a></span>
+              </div>
+              <div class="result-body">${body}</div>
+              <div class="result-scores">kw ${d.kw_score} &nbsp; sem ${d.sem_score}</div>
+            </div>`;
+        }).join("");
+      } catch (err) {
+        statusEl.textContent = "Error: " + err.message;
+      }
+    }
+
+    function esc(s) {
+      return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+  </script>
+</body>
+</html>

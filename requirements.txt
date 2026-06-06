@@ -1,0 +1,10 @@
+totolo
+rapidfuzz
+tantivy
+sentence-transformers
+fastapi
+uvicorn
+numpy
+mcp
+pytest
+pytest-cov
