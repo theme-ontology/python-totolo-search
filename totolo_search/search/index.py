@@ -217,7 +217,9 @@ def load() -> tuple:
         docs = json.load(f)
     with open(PIECES_FILE, encoding="utf-8") as f:
         pieces_ids = json.load(f)
-    embeddings = np.load(str(EMBEDDINGS_FILE))
+    # mmap (file-backed) so these pages are reclaimable under memory pressure instead of pinned anon
+    # RAM — the kernel can drop and re-fault them from disk rather than OOM-killing.
+    embeddings = np.load(str(EMBEDDINGS_FILE), mmap_mode="r")
     idx = tantivy.Index(_schema(), path=str(INDEX_DIR))
     return idx, embeddings, pieces_ids, {d["name"]: d for d in docs}
 
@@ -225,7 +227,7 @@ def load() -> tuple:
 def load_annotations() -> tuple:
     with open(ANN_DOCS_FILE, encoding="utf-8") as f:
         anns = json.load(f)
-    embeddings = np.load(str(ANN_EMB_FILE))
+    embeddings = np.load(str(ANN_EMB_FILE), mmap_mode="r")   # mmap: reclaimable (see load())
     idx = tantivy.Index(_schema(), path=str(ANN_INDEX_DIR))
     return idx, embeddings, anns
 
