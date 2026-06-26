@@ -13,6 +13,12 @@ Tools, at a glance:
 
 Query syntax (all search_* tools): "exact phrase", +required term, -excluded term; bare words are
 optional/boosted. Names returned by one tool are the exact `name` to pass to get_document.
+
+Every search_* tool takes two switches:
+  fuzzy=True     allow NEAR (1-edit) typo matches, appended below exact hits at low weight. Set
+                 False for exact (stemmed) matching only.
+  semantic=True  blend in embedding-based semantic search. Set False for keyword-only (raw BM25)
+                 results — useful when you (an LLM) intend to rerank the candidates yourself.
 """
 from mcp.server.fastmcp import FastMCP
 from totolo_search.search.engine import SearchEngine
@@ -20,7 +26,8 @@ from totolo_search.search.engine import SearchEngine
 mcp = FastMCP("totolo-search")
 _engine: SearchEngine | None = None
 
-_SYNTAX = 'Query syntax: "exact phrase", +required, -excluded; plain words optional.'
+_SYNTAX = ('Query syntax: "exact phrase", +required, -excluded; plain words optional. '
+           'fuzzy=False for exact-only; semantic=False for keyword-only (you rerank).')
 
 
 def _get_engine() -> SearchEngine:
@@ -31,40 +38,40 @@ def _get_engine() -> SearchEngine:
 
 
 @mcp.tool()
-def search(query: str, limit: int = 20) -> list[dict]:
+def search(query: str, limit: int = 20, fuzzy: bool = True, semantic: bool = True) -> list[dict]:
     """Search ALL themeontology.org documents (themes, stories, collections) by keyword + semantic
     similarity. Returns ranked {name, type, description, …}. Use the type-specific tools to narrow.
     """ + _SYNTAX
-    return _get_engine().search(query, limit)
+    return _get_engine().search(query, limit, fuzzy=fuzzy, semantic=semantic)
 
 
 @mcp.tool()
-def search_themes(query: str, limit: int = 20) -> list[dict]:
+def search_themes(query: str, limit: int = 20, fuzzy: bool = True, semantic: bool = True) -> list[dict]:
     """Search only literary THEMES (abstract ideas like 'betrayal', 'coming of age', 'destiny').
     Start here to find the canonical theme name + description. """ + _SYNTAX
-    return _get_engine().search_themes(query, limit)
+    return _get_engine().search_themes(query, limit, fuzzy=fuzzy, semantic=semantic)
 
 
 @mcp.tool()
-def search_stories(query: str, limit: int = 20) -> list[dict]:
+def search_stories(query: str, limit: int = 20, fuzzy: bool = True, semantic: bool = True) -> list[dict]:
     """Search only STORIES (films, books, plays, episodes). Returns {name, title, date, description}.
     The `name` is the unique id to pass to get_document. """ + _SYNTAX
-    return _get_engine().search_stories(query, limit)
+    return _get_engine().search_stories(query, limit, fuzzy=fuzzy, semantic=semantic)
 
 
 @mcp.tool()
-def search_collections(query: str, limit: int = 20) -> list[dict]:
+def search_collections(query: str, limit: int = 20, fuzzy: bool = True, semantic: bool = True) -> list[dict]:
     """Search only COLLECTIONS (named groups of stories, e.g. a series or a curated set). """ + _SYNTAX
-    return _get_engine().search_collections(query, limit)
+    return _get_engine().search_collections(query, limit, fuzzy=fuzzy, semantic=semantic)
 
 
 @mcp.tool()
-def search_annotations(query: str, limit: int = 20) -> list[dict]:
+def search_annotations(query: str, limit: int = 20, fuzzy: bool = True, semantic: bool = True) -> list[dict]:
     """Search the story-theme ANNOTATIONS by their motivation prose — i.e. find where the ontology
-    explains WHY a theme applies to a story. Returns {name, story, theme, level, motivation}; `level`
-    is choice/major/minor/not. Use this to find precedent for how a theme has been argued/applied.
-    """ + _SYNTAX
-    return _get_engine().search_annotations(query, limit)
+    explains WHY a theme applies to a story. Returns {name, story, story_title, theme, level,
+    motivation}; `level` is choice/major/minor/not; `name` is "<story> :: <theme>". Use this to find
+    precedent for how a theme has been argued/applied. """ + _SYNTAX
+    return _get_engine().search_annotations(query, limit, fuzzy=fuzzy, semantic=semantic)
 
 
 @mcp.tool()
@@ -91,7 +98,8 @@ def list_collections(offset: int = 0, limit: int = 200) -> dict:
 def get_document(name: str) -> dict | None:
     """Retrieve the FULL record for a theme/story/collection/annotation by its exact `name` (as
     returned by any search/list tool). Themes include description, aliases, parents; stories include
-    title, date, authors, and their annotated themes; annotations include the motivation."""
+    title, date, authors, and their annotated themes; an annotation (name "<story> :: <theme>")
+    returns {story, story_title, theme, level, motivation}."""
     return _get_engine().get_document(name)
 
 

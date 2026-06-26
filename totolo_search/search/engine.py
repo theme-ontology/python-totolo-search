@@ -106,18 +106,30 @@ class SearchEngine:
             self._model = SentenceTransformer(idx_module.MODEL_NAME)
         return self._model
 
-    # ---- lexical (tantivy, multi-field + boosts + fuzzy) ----
-    def _lexical(self, index, parsed: dict, k: int) -> list[str]:
+    # ---- lexical (tantivy, multi-field + boosts) ----
+    def _lexical(self, index, parsed: dict, k: int, fuzzy: bool = True) -> list[str]:
+        """Exact (stemmed) matches first, at full weight. When `fuzzy`, NEAR matches (Levenshtein
+        distance 1, no prefix expansion) are appended AFTER the exact ones — so fuzzy only fills gaps
+        and never outranks an exact hit (matching totolo-search-web's low fuzzy weighting)."""
         qstr = _to_tantivy_query(parsed)
         if not qstr.strip():
             return []
-        try:
-            q = index.parse_query(qstr, idx_module.FIELDS, field_boosts=idx_module.BOOSTS,
-                                   fuzzy_fields={f: (True, 1, True) for f in idx_module.FIELDS})
-        except Exception:
-            return []
         searcher = index.searcher()
-        return [searcher.doc(addr)["doc_id"][0] for _s, addr in searcher.search(q, k).hits]
+
+        def run(fuzzy_fields):
+            try:
+                q = index.parse_query(qstr, idx_module.FIELDS, field_boosts=idx_module.BOOSTS,
+                                      fuzzy_fields=fuzzy_fields)
+            except Exception:
+                return []
+            return [searcher.doc(addr)["doc_id"][0] for _s, addr in searcher.search(q, k).hits]
+
+        exact = run({})
+        if not fuzzy or len(exact) >= k:
+            return exact[:k]
+        seen = set(exact)
+        near = [d for d in run({f: (False, 1, True) for f in idx_module.FIELDS}) if d not in seen]
+        return (exact + near)[:k]
 
     # ---- semantic ----
     def _semantic_main(self, query: str, k: int) -> list[str]:
@@ -145,26 +157,32 @@ class SearchEngine:
                 scores[doc_id] = scores.get(doc_id, 0.0) + w / (_RRF_K + rank + 1)
         return scores
 
-    def search(self, query: str, limit: int = 20, types=None) -> list[dict]:
-        """Hybrid (keyword + semantic) search over themes/stories/collections, optional `types` filter."""
+    def search(self, query: str, limit: int = 20, types=None,
+               fuzzy: bool = True, semantic: bool = True) -> list[dict]:
+        """Search themes/stories/collections, optional `types` filter.
+        fuzzy=False -> exact (stemmed) matches only. semantic=False -> keyword-only (no embeddings),
+        returning the raw BM25 ranking for the caller (e.g. an LLM) to rerank itself."""
         parsed = parse_operators(query)
         pool = None
         if types:
             types = {types} if isinstance(types, str) else set(types)
             pool = {n for n, d in self._doc_map.items() if d["type"] in types}
         k = limit if pool is None else max(200, limit * 10)
-        kw = self._lexical(self._index, parsed, k)
-        sem = self._semantic_main(parsed["free_text"] or query, k)
+        kw = self._lexical(self._index, parsed, k, fuzzy=fuzzy)
+        sem = self._semantic_main(parsed["free_text"] or query, k) if semantic else []
         if pool is not None:
             kw = [n for n in kw if n in pool]
             sem = [n for n in sem if n in pool]
         kw_w, sem_w = 2.0, 1.0
         kw_s = {d: kw_w / (_RRF_K + r + 1) for r, d in enumerate(kw)}
         sem_s = {d: sem_w / (_RRF_K + r + 1) for r, d in enumerate(sem)}
-        merged = sorted(self._rrf([kw, sem], [kw_w, sem_w]), key=lambda x: kw_s.get(x, 0) + sem_s.get(x, 0),
-                        reverse=True)[:limit]
+        if sem:
+            order = sorted(self._rrf([kw, sem], [kw_w, sem_w]),
+                           key=lambda x: kw_s.get(x, 0) + sem_s.get(x, 0), reverse=True)
+        else:
+            order = kw   # keyword-only: leave reranking to the caller
         out = []
-        for name in merged:
+        for name in order[:limit]:
             doc = self._doc_map.get(name)
             if not doc:
                 continue
@@ -178,14 +196,14 @@ class SearchEngine:
             out.append(entry)
         return out
 
-    def search_themes(self, query: str, limit: int = 20) -> list[dict]:
-        return self.search(query, limit, types=["theme"])
+    def search_themes(self, query, limit=20, fuzzy=True, semantic=True):
+        return self.search(query, limit, types=["theme"], fuzzy=fuzzy, semantic=semantic)
 
-    def search_stories(self, query: str, limit: int = 20) -> list[dict]:
-        return self.search(query, limit, types=["story"])
+    def search_stories(self, query, limit=20, fuzzy=True, semantic=True):
+        return self.search(query, limit, types=["story"], fuzzy=fuzzy, semantic=semantic)
 
-    def search_collections(self, query: str, limit: int = 20) -> list[dict]:
-        return self.search(query, limit, types=["collection"])
+    def search_collections(self, query, limit=20, fuzzy=True, semantic=True):
+        return self.search(query, limit, types=["collection"], fuzzy=fuzzy, semantic=semantic)
 
     # ---- annotations (separate, lazily loaded) ----
     def _ensure_ann(self):
@@ -194,25 +212,29 @@ class SearchEngine:
             self._ann = (idx, emb, [a["name"] for a in anns], {a["name"]: a for a in anns})
         return self._ann
 
-    def search_annotations(self, query: str, limit: int = 20) -> list[dict]:
-        """Search the motivation prose of story-theme annotations (WHY a theme applies to a story)."""
+    def search_annotations(self, query, limit=20, fuzzy=True, semantic=True):
+        """Search the motivation prose of story-theme annotations (WHY a theme applies to a story).
+        Semantic leads when on (motivations are prose); semantic=False gives keyword-only."""
         if not idx_module.annotations_built():
             return []
         idx, emb, names, name_map = self._ensure_ann()
         parsed = parse_operators(query)
-        kw = self._lexical(idx, parsed, limit * 3)
-        sem = self._semantic_ann(emb, names, parsed["free_text"] or query, limit * 3)
-        # Motivations are natural-language prose, so the semantic side leads here (the reverse of the
-        # main index, where short titles/descriptions make keyword the stronger signal).
-        merged = sorted(self._rrf([sem, kw], [2.0, 1.0]).items(), key=lambda kv: kv[1], reverse=True)[:limit]
+        kw = self._lexical(idx, parsed, limit * 3, fuzzy=fuzzy)
+        sem = self._semantic_ann(emb, names, parsed["free_text"] or query, limit * 3) if semantic else []
+        if sem:
+            order = [n for n, _ in sorted(self._rrf([sem, kw], [2.0, 1.0]).items(),
+                                          key=lambda kv: kv[1], reverse=True)]
+        else:
+            order = kw
         out = []
-        for name, _score in merged:
+        for name in order[:limit]:
             a = name_map.get(name)
             if not a:
                 continue
             mot = a["motivation"]
-            out.append({"name": name, "type": "story-theme", "story": a["story"], "theme": a["theme"],
-                        "level": a["level"],
+            out.append({"name": name, "type": "story-theme",
+                        "story": a["story"], "story_title": a.get("story_title", ""),
+                        "theme": a["theme"], "level": a["level"],
                         "motivation": mot[:300] + ("..." if len(mot) > 300 else "")})
         return out
 
@@ -242,5 +264,8 @@ class SearchEngine:
             return d
         if idx_module.annotations_built() and " :: " in (name or ""):
             _, _, _, name_map = self._ensure_ann()
-            return name_map.get(name)
+            a = name_map.get(name)
+            if a:   # drop the internal index fields; return the meaningful record
+                return {k: v for k, v in a.items()
+                        if k not in ("search_title", "search_body", "search_misc")}
         return None
