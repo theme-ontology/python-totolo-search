@@ -14,22 +14,26 @@ INDEX_DIR = DATA_DIR / "index"
 DOCS_FILE = DATA_DIR / "docs.json"
 PIECES_FILE = DATA_DIR / "pieces.json"
 EMBEDDINGS_FILE = DATA_DIR / "embeddings.npy"
+# The annotation index is SEPARATE and built/loaded on its own, so the main index stays lean and the
+# ~58k motivation embeddings only cost memory when someone actually searches annotations.
+ANN_INDEX_DIR = DATA_DIR / "ann_index"
+ANN_DOCS_FILE = DATA_DIR / "annotations.json"
+ANN_EMB_FILE = DATA_DIR / "ann_embeddings.npy"
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-_STOPWORDS = {
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "as", "is", "it", "its", "that", "this",
-    "was", "are", "be", "been", "being", "have", "has", "had", "do", "does",
-    "did", "will", "would", "could", "should", "may", "might", "not", "no",
-    "so", "then", "when", "where", "which", "who", "what", "how", "if",
-    "i", "we", "he", "she", "they", "you", "me", "him", "her", "us", "them",
-}
+# Three weighted fields (eDisMax-style), matching totolo-search-web. Boosts are applied at query time.
+FIELDS = ["search_title", "search_body", "search_misc"]
+BOOSTS = {"search_title": 2.5, "search_body": 1.0, "search_misc": 0.4}
+
+WEIGHTS = {"choice themes": "choice", "major themes": "major",
+           "minor themes": "minor", "not themes": "not"}
 
 
 def _schema():
     builder = tantivy.SchemaBuilder()
     builder.add_text_field("doc_id", stored=True)
-    builder.add_text_field("search_text", stored=False, tokenizer_name="en_stem")
+    for f in FIELDS:
+        builder.add_text_field(f, stored=False, tokenizer_name="en_stem")
     return builder.build()
 
 
@@ -41,28 +45,29 @@ def _to_str(val) -> str:
     return str(val).strip()
 
 
-def _weighted(val, n: int) -> str:
-    s = _to_str(val)
-    return " ".join([s] * n) if s else ""
+def _join(*vals) -> str:
+    return " ".join(s for s in (_to_str(v) for v in vals) if s)
 
 
-def _theme_search_text(doc: dict) -> str:
-    return " ".join(filter(None, [
-        _weighted(doc.get("name"), 4),
-        _weighted(doc.get("aliases"), 3),
-        _weighted(doc.get("description"), 2),
-        _weighted(doc.get("examples"), 1),
-        _weighted(doc.get("notes"), 1),
-    ]))
+def _doc_search_fields(doc: dict) -> dict:
+    """The three weighted search fields for a theme / story / collection (mirrors web corpus.ts)."""
+    if doc["type"] == "theme":
+        title = _join(doc.get("name"), doc.get("aliases"))
+        misc = _join(doc.get("examples"), doc.get("notes"))
+    else:  # story / collection
+        title = _join(doc.get("name"), doc.get("title"), doc.get("date"), doc.get("authors"))
+        misc = _join(doc.get("other keywords"), doc.get("story format"))
+    return {"search_title": title, "search_body": _to_str(doc.get("description")), "search_misc": misc}
 
 
-def _story_search_text(doc: dict) -> str:
-    return " ".join(filter(None, [
-        _weighted(doc.get("title"), 4),
-        _weighted(doc.get("description"), 2),
-        _weighted(doc.get("date"), 2),
-        _weighted(doc.get("authors"), 2),
-    ]))
+_STOPWORDS = {
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "as", "is", "it", "its", "that", "this",
+    "was", "are", "be", "been", "being", "have", "has", "had", "do", "does",
+    "did", "will", "would", "could", "should", "may", "might", "not", "no",
+    "so", "then", "when", "where", "which", "who", "what", "how", "if",
+    "i", "we", "he", "she", "they", "you", "me", "him", "her", "us", "them",
+}
 
 
 def _content_words(text: str) -> list[str]:
@@ -71,9 +76,8 @@ def _content_words(text: str) -> list[str]:
 
 
 def _embed_pieces(doc: dict) -> list[str]:
-    """Short text pieces to embed: full name/alias phrases + individual content words."""
-    pieces = []
-    seen: set[str] = set()
+    """Short text pieces to embed: full name/alias/title phrases + individual content words."""
+    pieces, seen = [], set()
 
     def add(text):
         t = _to_str(text).strip()
@@ -96,84 +100,116 @@ def _embed_pieces(doc: dict) -> list[str]:
     else:
         add(doc.get("title"))
         add(doc.get("name"))
-
     return pieces
 
 
 def fetch_documents(ontology) -> list[dict]:
+    """Themes + stories + collections, each enriched with its three weighted search fields."""
     log.info("Processing ontology documents...")
     todict = ontology.to_dict()
     docs = []
-
-    for raw in todict.get("themes", []):
-        doc = dict(raw)
-        doc["type"] = "theme"
-        doc["search_text"] = _theme_search_text(doc)
-        docs.append(doc)
-
-    for raw in todict.get("stories", []):
-        doc = dict(raw)
-        doc["type"] = "story"
-        doc["search_text"] = _story_search_text(doc)
-        docs.append(doc)
-
-    for raw in todict.get("collections", []):
-        doc = dict(raw)
-        doc["type"] = "collection"
-        doc["search_text"] = _story_search_text(doc)
-        docs.append(doc)
-
+    for typ, key in (("theme", "themes"), ("story", "stories"), ("collection", "collections")):
+        for raw in todict.get(key, []):
+            doc = dict(raw)
+            doc["type"] = typ
+            doc.update(_doc_search_fields(doc))
+            docs.append(doc)
     log.info("Processed %d documents", len(docs))
     return docs
 
 
-def build(ontology=None) -> tuple:
-    if ontology is None:
-        log.info("Fetching latest ontology from totolo...")
-        ontology = totolo.remote()
+def fetch_annotations(ontology) -> list[dict]:
+    """One document per story-theme annotation that carries a motivation. The motivation is the body;
+    the searchable identity is '<theme> <story>'. Built straight from to_dict()'s weighted theme lists."""
+    todict = ontology.to_dict()
+    anns = []
+    for key in ("stories", "collections"):
+        for st in todict.get(key, []):
+            story = st.get("name", "")
+            title = _to_str(st.get("title"))
+            for wkey, level in WEIGHTS.items():
+                for entry in st.get(wkey, []) or []:
+                    theme = entry.get("name", "")
+                    motivation = _to_str(entry.get("motivation"))
+                    if not (theme and motivation):
+                        continue
+                    anns.append({
+                        "name": f"{story} :: {theme}",
+                        "type": "story-theme",
+                        "story": story, "story_title": title, "theme": theme,
+                        "level": level, "motivation": motivation,
+                        "search_title": _join(theme, story, title),
+                        "search_body": motivation,
+                        "search_misc": level,
+                    })
+    return anns
 
-    docs = fetch_documents(ontology)
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if INDEX_DIR.exists():
-        shutil.rmtree(INDEX_DIR)
-    INDEX_DIR.mkdir(parents=True, exist_ok=True)
-
-    with open(DOCS_FILE, "w", encoding="utf-8") as f:
-        json.dump(docs, f)
-
-    log.info("Building tantivy index...")
-    idx = tantivy.Index(_schema(), path=str(INDEX_DIR))
+def _build_tantivy(docs: list[dict], index_dir: Path):
+    if index_dir.exists():
+        shutil.rmtree(index_dir)
+    index_dir.mkdir(parents=True, exist_ok=True)
+    idx = tantivy.Index(_schema(), path=str(index_dir))
     writer = idx.writer()
     for doc in docs:
         writer.add_document(tantivy.Document(
             doc_id=doc["name"],
-            search_text=doc["search_text"],
-        ))
+            search_title=doc["search_title"], search_body=doc["search_body"], search_misc=doc["search_misc"]))
     writer.commit()
+    return idx
 
-    # Build piece-level embeddings: index short phrases and content words per doc,
-    # then at search time max-pool scores across all pieces of a document.
+
+def _embed(texts: list[str]) -> np.ndarray:
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer(MODEL_NAME)
+    return model.encode(texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
+
+
+def build(ontology=None) -> tuple:
+    """Build the MAIN index (themes/stories/collections): tantivy + piece-level semantic embeddings."""
+    if ontology is None:
+        log.info("Fetching latest ontology from totolo...")
+        ontology = totolo.remote()
+    docs = fetch_documents(ontology)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    log.info("Building tantivy index (%d docs)...", len(docs))
+    idx = _build_tantivy(docs, INDEX_DIR)
+    with open(DOCS_FILE, "w", encoding="utf-8") as f:
+        json.dump(docs, f)
+
     log.info("Building piece-level semantic embeddings...")
-    pieces_texts: list[str] = []
-    pieces_ids: list[str] = []
+    pieces_texts, pieces_ids = [], []
     for doc in docs:
         for piece in _embed_pieces(doc):
             pieces_texts.append(piece)
             pieces_ids.append(doc["name"])
-
-    log.info("Embedding %d text pieces from %d documents...", len(pieces_texts), len(docs))
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer(MODEL_NAME)
-    embeddings = model.encode(pieces_texts, show_progress_bar=True, normalize_embeddings=True)
-
+    log.info("Embedding %d pieces from %d docs...", len(pieces_texts), len(docs))
+    embeddings = _embed(pieces_texts)
     with open(PIECES_FILE, "w", encoding="utf-8") as f:
         json.dump(pieces_ids, f)
     np.save(str(EMBEDDINGS_FILE), embeddings)
+    log.info("Main index built: %d docs, %d pieces", len(docs), len(pieces_texts))
+    return idx, embeddings, pieces_ids, {d["name"]: d for d in docs}
 
-    log.info("Index built: %d documents, %d pieces", len(docs), len(pieces_texts))
-    doc_map = {d["name"]: d for d in docs}
-    return idx, embeddings, pieces_ids, doc_map
+
+def build_annotations(ontology=None) -> tuple:
+    """Build the SEPARATE annotation index: tantivy + ONE motivation embedding per annotation."""
+    if ontology is None:
+        ontology = totolo.remote()
+    anns = fetch_annotations(ontology)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    log.info("Building annotation tantivy index (%d annotations)...", len(anns))
+    idx = _build_tantivy(anns, ANN_INDEX_DIR)
+    with open(ANN_DOCS_FILE, "w", encoding="utf-8") as f:
+        json.dump(anns, f)
+
+    log.info("Embedding %d motivations...", len(anns))
+    embeddings = _embed([a["motivation"] for a in anns])
+    np.save(str(ANN_EMB_FILE), embeddings)
+    log.info("Annotation index built: %d annotations", len(anns))
+    return idx, embeddings, {a["name"]: a for a in anns}
 
 
 def load() -> tuple:
@@ -182,12 +218,23 @@ def load() -> tuple:
     with open(PIECES_FILE, encoding="utf-8") as f:
         pieces_ids = json.load(f)
     embeddings = np.load(str(EMBEDDINGS_FILE))
-    doc_map = {d["name"]: d for d in docs}
     idx = tantivy.Index(_schema(), path=str(INDEX_DIR))
-    return idx, embeddings, pieces_ids, doc_map
+    return idx, embeddings, pieces_ids, {d["name"]: d for d in docs}
+
+
+def load_annotations() -> tuple:
+    with open(ANN_DOCS_FILE, encoding="utf-8") as f:
+        anns = json.load(f)
+    embeddings = np.load(str(ANN_EMB_FILE))
+    idx = tantivy.Index(_schema(), path=str(ANN_INDEX_DIR))
+    return idx, embeddings, anns
 
 
 def ensure(force: bool = False) -> tuple:
     if force or not EMBEDDINGS_FILE.exists():
         return build()
     return load()
+
+
+def annotations_built() -> bool:
+    return ANN_EMB_FILE.exists() and ANN_DOCS_FILE.exists()
