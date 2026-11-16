@@ -27,7 +27,23 @@ mcp = FastMCP("totolo-search")
 _engine: SearchEngine | None = None
 
 _SYNTAX = ('Query syntax: "exact phrase", +required, -excluded; plain words optional. '
-           'fuzzy=False for exact-only; semantic=False for keyword-only (you rerank).')
+           'fuzzy=True (default) appends near (1-edit typo) matches below exact ones; fuzzy=False '
+           'for exact (stemmed) only. semantic=True (default) blends in embedding similarity; '
+           'semantic=False for keyword-only BM25 order (you rerank).')
+_SCORES = (' Each row carries kw_score and sem_score: its reciprocal-rank contribution from the '
+           'keyword list (2/(61+rank)) and the semantic list (1/(61+rank)); rows are ordered by '
+           'their sum. 0 means the row was not in that list (e.g. below the semantic similarity '
+           'cutoff, or semantic=False).')
+
+
+def _doc(extra: str):
+    # Append shared text to a tool's docstring. A string concatenation as a function's first
+    # statement is an expression, not a docstring (__doc__ stays None), so FastMCP would publish
+    # no description at all for the tool.
+    def wrap(fn):
+        fn.__doc__ = (fn.__doc__ or "").rstrip() + " " + extra
+        return fn
+    return wrap
 
 
 def _get_engine() -> SearchEngine:
@@ -38,39 +54,46 @@ def _get_engine() -> SearchEngine:
 
 
 @mcp.tool()
+@_doc(_SYNTAX + _SCORES)
 def search(query: str, limit: int = 20, fuzzy: bool = True, semantic: bool = True) -> list[dict]:
     """Search ALL themeontology.org documents (themes, stories, collections) by keyword + semantic
-    similarity. Returns ranked {name, type, description, …}. Use the type-specific tools to narrow.
-    """ + _SYNTAX
+    similarity, all types in one ranked list. Each row is {name, type, description, kw_score,
+    sem_score} (+ title, date for stories/collections), `type` being "theme", "story" or
+    "collection". Annotations are NOT included (use search_annotations). Use the type-specific
+    tools to narrow to one type."""
     return _get_engine().search(query, limit, fuzzy=fuzzy, semantic=semantic)
 
 
 @mcp.tool()
+@_doc(_SYNTAX + _SCORES)
 def search_themes(query: str, limit: int = 20, fuzzy: bool = True, semantic: bool = True) -> list[dict]:
     """Search only literary THEMES (abstract ideas like 'betrayal', 'coming of age', 'destiny').
-    Start here to find the canonical theme name + description. """ + _SYNTAX
+    Start here to find the canonical theme name + description. """
     return _get_engine().search_themes(query, limit, fuzzy=fuzzy, semantic=semantic)
 
 
 @mcp.tool()
+@_doc(_SYNTAX + _SCORES)
 def search_stories(query: str, limit: int = 20, fuzzy: bool = True, semantic: bool = True) -> list[dict]:
     """Search only STORIES (films, books, plays, episodes). Returns {name, title, date, description}.
-    The `name` is the unique id to pass to get_document. """ + _SYNTAX
+    The `name` is the unique id to pass to get_document. """
     return _get_engine().search_stories(query, limit, fuzzy=fuzzy, semantic=semantic)
 
 
 @mcp.tool()
+@_doc(_SYNTAX + _SCORES)
 def search_collections(query: str, limit: int = 20, fuzzy: bool = True, semantic: bool = True) -> list[dict]:
-    """Search only COLLECTIONS (named groups of stories, e.g. a series or a curated set). """ + _SYNTAX
+    """Search only COLLECTIONS (named groups of stories, e.g. a series or a curated set). """
     return _get_engine().search_collections(query, limit, fuzzy=fuzzy, semantic=semantic)
 
 
 @mcp.tool()
+@_doc(_SYNTAX)
 def search_annotations(query: str, limit: int = 20, fuzzy: bool = True, semantic: bool = True) -> list[dict]:
     """Search the story-theme ANNOTATIONS by their motivation prose — i.e. find where the ontology
     explains WHY a theme applies to a story. Returns {name, story, story_title, theme, level,
     motivation}; `level` is choice/major/minor/not; `name` is "<story> :: <theme>". Use this to find
-    precedent for how a theme has been argued/applied. """ + _SYNTAX
+    precedent for how a theme has been argued/applied. """
     return _get_engine().search_annotations(query, limit, fuzzy=fuzzy, semantic=semantic)
 
 
